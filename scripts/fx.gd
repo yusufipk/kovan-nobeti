@@ -1,10 +1,13 @@
 extends Node3D
 # Hit feedback: damage numbers (drawn in 2D), particle bursts, explosions, screen shake.
 
+const DMAX := 420
+const WMAX := 48
+
 var main
 var trauma := 0.0
 var shake_time := 0.0
-var numbers: Array = []
+var numbers: Array[Dictionary] = []
 var num_layer: Control
 var bursts: Array[CPUParticles3D] = []
 var burst_i := 0
@@ -18,17 +21,15 @@ var hurt_rect: ColorRect
 var hurt_a := 0.0
 var hit_budget := 0
 # ground marks: soil where something dug out, goo where something died. A ring buffer on one MultiMesh.
-const DMAX := 420
 var decal_mm: MultiMesh
 var decal_t := PackedFloat32Array()
 var decal_life := PackedFloat32Array()
 var decal_col: Array[Color] = []
+var decal_active: Array[int] = []
 var decal_i := 0
-# danger zones painted on the ground before an attack lands:
-# [x, z, radius (or half width), time left, total time, kind (0 circle, 1 lane), yaw, lane length]
-const WMAX := 48
+# danger zones painted on the ground before an attack lands
 var warn_mm: MultiMesh
-var warns: Array = []
+var warns: Array[Dictionary] = []
 
 func setup(m) -> void:
 	main = m
@@ -42,15 +43,13 @@ func setup(m) -> void:
 	pmat.vertex_color_is_srgb = true
 	pm.material = pmat
 	for k in 14:
-		var p := _make_particles(pm, 14, 0.5)
-		bursts.append(p)
+		bursts.append(_make_particles(pm, 14, 0.5))
 	for k in 20:
 		var p2 := _make_particles(pm, 5, 0.28)
 		p2.initial_velocity_min = 3.0
 		p2.initial_velocity_max = 6.0
 		p2.color = Color(1.0, 0.95, 0.7)
 		hits.append(p2)
-	# explosions are flat shockwaves on the ground: a bright rim that runs outward over a short flash
 	var sm := QuadMesh.new()
 	sm.size = Vector2(2, 2)
 	sm.orientation = PlaneMesh.FACE_Y
@@ -122,7 +121,6 @@ void vertex() { col = vec4(pow(COLOR.rgb, vec3(2.2)), COLOR.a); seed = INSTANCE_
 void fragment() {
 	vec2 p = UV * 2.0 - 1.0;
 	float a = atan(p.y, p.x);
-	// a lumpy blob: the edge wanders with the angle, differently for every mark
 	float edge = 0.72 + 0.16 * sin(a * 3.0 + seed) + 0.10 * sin(a * 7.0 + seed * 2.3);
 	float d = length(p);
 	ALBEDO = col.rgb * (0.85 + 0.15 * smoothstep(edge, 0.0, d));
@@ -167,13 +165,11 @@ void fragment() {
 	vec2 p = UV * 2.0 - 1.0;
 	float a;
 	if (kind < 0.5) {
-		// a circle that fills from the middle as the hit comes closer
 		float d = length(p);
 		float rim = smoothstep(0.86, 0.91, d) * (1.0 - smoothstep(0.96, 1.0, d));
 		float inside = 1.0 - smoothstep(0.96, 1.0, d);
 		a = max(rim * 0.9, inside * (0.14 + 0.3 * (1.0 - step(prog, d))));
 	} else {
-		// a lane that fills from the near end
 		vec2 q = abs(p);
 		float rim = max(smoothstep(0.86, 0.94, q.x), smoothstep(0.975, 0.99, q.y));
 		a = max(rim * 0.85, 0.12 + 0.3 * (1.0 - step(prog, p.y * 0.5 + 0.5)));
@@ -194,20 +190,19 @@ void fragment() {
 	inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(inst)
 
-# Marks where something is about to land, `life` seconds ahead.
 func warn(x: float, z: float, r: float, life: float) -> void:
 	if warns.size() < WMAX:
-		warns.append([x, z, r, life, life, 0, 0.0, 0.0])
+		warns.append({"x": x, "z": z, "r": r, "left": life, "total": life, "kind": 0, "yaw": 0.0, "length": 0.0})
 
-# The same for a charge: a lane that starts at (x, z) and runs `length` along yaw.
 func warn_lane(x: float, z: float, yaw: float, half_w: float, length: float, life: float) -> void:
 	if warns.size() < WMAX:
-		warns.append([x, z, half_w, life, life, 1, yaw, length])
+		warns.append({"x": x, "z": z, "r": half_w, "left": life, "total": life, "kind": 1, "yaw": yaw, "length": length})
 
-# A mark on the ground that fades out over `life` seconds.
 func splat(x: float, z: float, size: float, col: Color, life: float) -> void:
 	var k := decal_i
 	decal_i = (decal_i + 1) % DMAX
+	if decal_t[k] <= 0.0:
+		decal_active.append(k)
 	decal_t[k] = life
 	decal_life[k] = life
 	decal_col[k] = col
@@ -221,10 +216,10 @@ func attach_ui(layer: Control, hurt: ColorRect) -> void:
 	num_layer.draw.connect(_draw_numbers)
 
 func reset() -> void:
-	for k in DMAX:
-		if decal_t[k] > 0.0:
-			decal_t[k] = 0.0
-			decal_mm.set_instance_color(k, Color(0, 0, 0, 0))
+	for k in decal_active:
+		decal_t[k] = 0.0
+		decal_mm.set_instance_color(k, Color(0, 0, 0, 0))
+	decal_active.clear()
 	numbers.clear()
 	warns.clear()
 	warn_mm.visible_instance_count = 0
@@ -297,36 +292,42 @@ func update(dt: float) -> void:
 			(b.material_override as ShaderMaterial).set_shader_parameter("f", f)
 			if boom_t[k] <= 0.0:
 				b.visible = false
-	for k in DMAX:
-		if decal_t[k] > 0.0:
+	if not decal_active.is_empty():
+		var keep_decals: Array[int] = []
+		for k in decal_active:
 			decal_t[k] -= dt
-			# full for most of its life, then fades over the last third
+			if decal_t[k] <= 0.0:
+				decal_t[k] = 0.0
+				decal_mm.set_instance_color(k, Color(0, 0, 0, 0))
+				continue
+			keep_decals.append(k)
 			var fade := decal_t[k] / (decal_life[k] * 0.35)
 			if fade < 1.0:
 				var c := decal_col[k]
 				c.a *= maxf(0.0, fade)
 				decal_mm.set_instance_color(k, c)
+		decal_active = keep_decals
 	var wk := 0
-	var wkeep: Array = []
+	var wkeep: Array[Dictionary] = []
 	for w in warns:
-		w[3] -= dt
-		if w[3] <= 0.0:
+		w.left -= dt
+		if w.left <= 0.0:
 			continue
 		wkeep.append(w)
-		var wp: float = 1.0 - float(w[3]) / float(w[4])
+		var wp: float = 1.0 - float(w.left) / float(w.total)
 		var wy := 0.06 + 0.001 * wk
-		if w[5] == 0:
-			warn_mm.set_instance_transform(wk, Transform3D(Basis.from_scale(Vector3(w[2], 1.0, w[2])), Vector3(w[0], wy, w[1])))
+		if w.kind == 0:
+			warn_mm.set_instance_transform(wk, Transform3D(Basis.from_scale(Vector3(w.r, 1.0, w.r)), Vector3(w.x, wy, w.z)))
 		else:
-			var wyaw: float = w[6]
-			var half: float = float(w[7]) * 0.5
-			var wb := Basis(Vector3.UP, wyaw).scaled_local(Vector3(w[2], 1.0, half))
-			warn_mm.set_instance_transform(wk, Transform3D(wb, Vector3(float(w[0]) + sin(wyaw) * half, wy, float(w[1]) + cos(wyaw) * half)))
-		warn_mm.set_instance_custom_data(wk, Color(wp, float(w[5]), 0.0, 0.0))
+			var wyaw: float = w.yaw
+			var half: float = float(w.length) * 0.5
+			var wb := Basis(Vector3.UP, wyaw).scaled_local(Vector3(w.r, 1.0, half))
+			warn_mm.set_instance_transform(wk, Transform3D(wb, Vector3(float(w.x) + sin(wyaw) * half, wy, float(w.z) + cos(wyaw) * half)))
+		warn_mm.set_instance_custom_data(wk, Color(wp, float(w.kind), 0.0, 0.0))
 		wk += 1
 	warns = wkeep
 	warn_mm.visible_instance_count = wk
-	var keep: Array = []
+	var keep: Array[Dictionary] = []
 	for n in numbers:
 		n.t += dt
 		if n.t < 0.7:
@@ -360,7 +361,6 @@ func _draw_numbers() -> void:
 			size = 26
 			col = Color(1.0, 0.92, 0.6)
 		var pop := 1.0 + maxf(0.0, 0.12 - t) * 5.0
-		# sizes move in steps of four: every distinct size costs the font another glyph atlas
 		size = (int(size * pop) >> 2) << 2
 		col.a = clampf((0.7 - t) * 3.5, 0.0, 1.0)
 		var s := str(n.v)

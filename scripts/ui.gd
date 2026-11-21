@@ -1,6 +1,5 @@
 extends CanvasLayer
-# Menus, HUD, upgrade cards and the end screen. Everything is built in code.
-# One look throughout: warm dark panels with cut corners, and every icon sits in a hexagonal cell.
+# Menus, HUD, story panel, upgrade cards and the end screen. Everything is built in code.
 
 const AMBER := Color(1.0, 0.74, 0.16)
 const TEAL := Color(0.2, 0.85, 0.75)
@@ -12,6 +11,12 @@ const WAX := Color(0.6, 0.45, 0.24)
 const MUTED := Color(0.86, 0.78, 0.66)
 const HONEY := Color(0.98, 0.68, 0.12)
 const FONT_PATH := "res://assets/font/Baloo2.ttf"
+
+const STORY_PARAGRAPHS := [
+	"Çayırın tam ortasında yükselen kadim Ana Kovan, yüzyıllardır vadinin en saf altın balını saklar. Güneş batıp gökyüzü karardığında bu balın kokusu toprağın derinliklerine sızar ve açgözlü böcek sürülerini uyandırır.",
+	"Sürünün öncüleri olan zırhlı Makas ve zehirli Akrep yolu açarken, her gecenin sonunda toprağı yararak Kraliçe yükselir. Kovanı korumak için geriye yalnızca son nöbetçi arıcı, sadık arı sürüsü ve çayırın dört yanına dağılmış kadim sunaklar kalmıştır.",
+	"Kraliçe'yi devirmek geceyi bitirir ama nöbeti değil: her şafakta yeni bir döngü başlar ve sürü daha da güçlenerek geri döner. Topladığın balla arıcılık ustalığını geliştir, sunakların lütfunu kuşan ve Ana Kovan düşene dek nöbeti tut.",
+]
 
 var main
 var font: FontVariation
@@ -25,11 +30,14 @@ var hud: Control
 var menu: Control
 var menu_record: Label
 var pause_panel: Control
-var settings_box: Control
 var settings_overlay: Control
+var story_panel: Control
+var story_btn: Button
+var story_ok: Button
+var story_first := false
 var choice_panel: Control
 var choice_title: Label
-var cards: Array = []
+var cards: Array[Dictionary] = []
 var card_data: Array = []
 var end_panel: Control
 var end_title: Label
@@ -41,10 +49,8 @@ var choice_lock := 0.0
 var bot_t := 0.0
 var toast_text := ""
 var toast_t := 0.0
-# where recent hits came from: [x, z, time left]
-var hurt_marks: Array = []
+var hurt_marks: Array[Dictionary] = []
 var ult_flash := 0.0
-# a big announcement with a line under it: champions, the queen
 var banner_title := ""
 var banner_sub := ""
 var banner_t := 0.0
@@ -66,7 +72,7 @@ var hive_panel: Control
 var hive_btn: Button
 var hive_back: Button
 var hive_honey: Label
-var hive_tiles: Array = []
+var hive_tiles: Array[Dictionary] = []
 var chip_buy: StyleBoxFlat
 var chip_wait: StyleBoxFlat
 var chip_full: StyleBoxFlat
@@ -86,7 +92,6 @@ func setup(m) -> void:
 	hurt = ColorRect.new()
 	hurt.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hurt.color = Color(1, 0, 0, 0)
-	# red gathers at the edges of the screen: a hit or low health must not paint over the fight
 	var hsh := Shader.new()
 	hsh.code = "shader_type canvas_item;\nvoid fragment() {\n\tfloat d = length(UV - vec2(0.5)) * 1.414;\n\tCOLOR.a *= mix(0.18, 1.0, smoothstep(0.42, 1.0, d));\n}\n"
 	var hmat := ShaderMaterial.new()
@@ -112,10 +117,10 @@ func setup(m) -> void:
 	_build_end()
 	_build_settings_overlay()
 	_build_hive()
+	_build_story()
 
 # ---------- helpers
 
-# The game's typeface at one weight; the engine's own font stands in if the file is missing.
 func _face(weight: int) -> FontVariation:
 	var fv := FontVariation.new()
 	if own_font:
@@ -126,7 +131,6 @@ func _face(weight: int) -> FontVariation:
 		fv.variation_embolden = 0.9 if weight >= 700 else 0.0
 	return fv
 
-# The same face for a label of one size: the typeface leaves a lot of air above and below a line, taken back here.
 func _f(size: int, bold := true) -> FontVariation:
 	var key := size * 2 + (1 if bold else 0)
 	if not faces.has(key):
@@ -137,7 +141,6 @@ func _f(size: int, bold := true) -> FontVariation:
 		faces[key] = fv
 	return faces[key]
 
-# A panel with its corners cut off straight, like a stretched honeycomb cell.
 func _style(bg: Color, border: Color, bw := 2, cut := 18, margin := 22) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = bg
@@ -149,7 +152,6 @@ func _style(bg: Color, border: Color, bw := 2, cut := 18, margin := 22) -> Style
 	s.set_content_margin_all(margin)
 	return s
 
-# lift: the label sits over the 3D scene and needs an outline and a shadow; inside a panel it stays flat
 func _label(text: String, size: int, col := CREAM, bold := true, lift := false) -> Label:
 	var l := Label.new()
 	l.text = text
@@ -182,7 +184,6 @@ func _button(text: String, cb: Callable, primary := false) -> Button:
 		elif st == "pressed":
 			s.bg_color = base.darkened(0.1)
 			s.border_color = CREAM
-			# the tile sinks onto its own edge
 			s.content_margin_top = 15
 			s.content_margin_bottom = 5
 		elif st == "disabled":
@@ -209,7 +210,17 @@ func _dim(alpha: float) -> ColorRect:
 	c.color = Color(0.045, 0.03, 0.02, alpha)
 	return c
 
-# ---------- hexagonal cells: the frame of every icon, level pip and meter
+func _title_with_version(title: String, size: int) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	var t := _label(title, size, AMBER)
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(t)
+	var ver := _label(main.VERSION, 22, MUTED, false)
+	ver.size_flags_vertical = Control.SIZE_SHRINK_END
+	row.add_child(ver)
+	return row
+
+# ---------- hexagonal cells
 
 func _hex_pts(c: Vector2, r: float) -> PackedVector2Array:
 	var pts := PackedVector2Array()
@@ -234,7 +245,6 @@ func _draw_badge(ci: CanvasItem, c: Vector2, r: float, tex: Texture2D, tint: Col
 		var s := r * 0.76
 		ci.draw_texture_rect(tex, Rect2(c - Vector2(s, s), Vector2(s, s) * 2.0), false, Color(1, 1, 1, a))
 
-# An icon in its cell as a control; change it with _set_badge.
 func _badge(size: float, tex: Texture2D, tint := AMBER) -> Control:
 	var c := Control.new()
 	c.custom_minimum_size = Vector2(size, size)
@@ -249,7 +259,6 @@ func _set_badge(c: Control, tex: Texture2D, tint: Color) -> void:
 	c.set_meta("tint", tint)
 	c.queue_redraw()
 
-# A row of small cells: filled ones are levels owned, bright ones are what the choice adds.
 func _pips(r: float, centred: bool) -> Control:
 	var c := Control.new()
 	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -284,7 +293,6 @@ func _set_pips(c: Control, n: int, lv: int, add: int, col: Color) -> void:
 	c.custom_minimum_size = Vector2(n * r * 2.15 + 2.0, r * 2.0 + 4.0)
 	c.queue_redraw()
 
-# A key on the keyboard, drawn as a small dark cap.
 func _keycap(text: String, size: int) -> PanelContainer:
 	var p := PanelContainer.new()
 	var s := _style(Color(INK, 0.88), Color(CREAM, 0.55), 2, 7, 0)
@@ -310,7 +318,6 @@ func _tex(t: Texture2D, size: float) -> TextureRect:
 	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return r
 
-# The slider handle: the engine's grey default is replaced by a honey drop.
 func _knob() -> ImageTexture:
 	var n := 30
 	var img := Image.create(n, n, false, Image.FORMAT_RGBA8)
@@ -347,17 +354,83 @@ func toast(t: String) -> void:
 	toast_text = t
 	toast_t = 2.6
 
-# The hive call just filled: say so where the eyes are, the small meter alone was missed for a whole run.
 func ult_ready() -> void:
 	ult_flash = 6.0
 
-# A hit leaves an arc on the side of the screen it came from.
 func hurt_from(x: float, z: float) -> void:
 	if hurt_marks.size() >= 6:
 		hurt_marks.pop_front()
-	hurt_marks.append([x, z, 1.1])
+	hurt_marks.append({"x": x, "z": z, "t": 1.1})
 
-# ---------- settings (shared by the pause menu and the main menu)
+# ---------- story overlay
+
+func _build_story() -> void:
+	story_panel = Control.new()
+	story_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	story_panel.visible = false
+	root.add_child(story_panel)
+	story_panel.add_child(_dim(0.74))
+	var cc := CenterContainer.new()
+	cc.set_anchors_preset(Control.PRESET_FULL_RECT)
+	story_panel.add_child(cc)
+	var p := PanelContainer.new()
+	p.custom_minimum_size = Vector2(980, 0)
+	p.add_theme_stylebox_override("panel", _style(Color(BARK, 0.98), AMBER, 3, 28, 38))
+	cc.add_child(p)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 22)
+	p.add_child(v)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 18)
+	v.add_child(head)
+	head.add_child(_badge(74, icons.get(24), AMBER))
+	var title_box := VBoxContainer.new()
+	title_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	title_box.add_theme_constant_override("separation", 2)
+	head.add_child(title_box)
+	title_box.add_child(_label("KOVANIN HİKAYESİ", 46, AMBER))
+	title_box.add_child(_label("Kovan Nöbeti  ·  %s" % main.VERSION, 20, MUTED, false))
+	var sep := ColorRect.new()
+	sep.color = Color(WAX, 0.55)
+	sep.custom_minimum_size = Vector2(0, 2)
+	v.add_child(sep)
+	for para in STORY_PARAGRAPHS:
+		var lbl := _label(para, 25, CREAM, false)
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		lbl.custom_minimum_size = Vector2(880, 0)
+		v.add_child(lbl)
+	var sp := Control.new()
+	sp.custom_minimum_size = Vector2(0, 6)
+	v.add_child(sp)
+	story_ok = _button("Kapat", func(): close_story(), true)
+	story_ok.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	v.add_child(story_ok)
+
+func open_story(first_launch := false) -> void:
+	story_first = first_launch
+	for b in menu_btns:
+		b.focus_mode = Control.FOCUS_NONE
+	story_ok.text = "Nöbete Başla" if first_launch else "Kapat"
+	story_panel.visible = true
+	story_ok.grab_focus()
+
+func close_story() -> void:
+	if not story_panel.visible:
+		return
+	story_panel.visible = false
+	if not main.story_seen:
+		main.story_seen = true
+		main.save_settings()
+	for b in menu_btns:
+		b.focus_mode = Control.FOCUS_ALL
+	if menu.visible:
+		if story_first and not menu_btns.is_empty():
+			menu_btns[0].grab_focus()
+		elif story_btn != null:
+			story_btn.grab_focus()
+
+# ---------- settings
 
 func _slider_row(parent: Container, title: String, key: String, lo: float, hi: float) -> void:
 	var row := HBoxContainer.new()
@@ -388,7 +461,6 @@ func _slider_row(parent: Container, title: String, key: String, lo: float, hi: f
 	s.value_changed.connect(func(v: float):
 		main.settings[key] = v
 		main.apply_settings())
-	# saved when the handle is let go, so no way of leaving the panel loses the change
 	s.drag_ended.connect(func(_changed: bool): main.save_settings())
 	row.add_child(s)
 	parent.add_child(row)
@@ -396,7 +468,6 @@ func _slider_row(parent: Container, title: String, key: String, lo: float, hi: f
 		sliders[key] = []
 	sliders[key].append(s)
 
-# both columns of the pause menu end level: there the full screen button sits with the other buttons
 func _settings_rows(parent: Container, with_screen := true) -> void:
 	_slider_row(parent, "Fare hassasiyeti", "sens", 0.2, 3.0)
 	_slider_row(parent, "Müzik", "music", 0.0, 1.0)
@@ -428,13 +499,12 @@ func _build_settings_overlay() -> void:
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 20)
 	p.add_child(v)
-	v.add_child(_label("Ayarlar", 40, AMBER))
+	v.add_child(_title_with_version("Ayarlar", 40))
 	_settings_rows(v)
 	settings_ok = _button("Tamam", func(): close_settings(), true)
 	settings_ok.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	v.add_child(settings_ok)
 
-# While the overlay is open the menu behind it takes no keyboard focus.
 func open_settings() -> void:
 	_sync_sliders()
 	for b in menu_btns:
@@ -449,10 +519,10 @@ func close_settings() -> void:
 	main.save_settings()
 	for b in menu_btns:
 		b.focus_mode = Control.FOCUS_ALL
-	if menu.visible and menu_btns.size() > 2:
-		menu_btns[2].grab_focus()
+	if menu.visible and menu_btns.size() > 3:
+		menu_btns[3].grab_focus()
 
-# ---------- the apiary: permanent upgrades bought with honey
+# ---------- beekeeping (meta upgrades)
 
 func _build_hive() -> void:
 	hive_panel = Control.new()
@@ -468,10 +538,9 @@ func _build_hive() -> void:
 	cc.add_child(v)
 	var top := HBoxContainer.new()
 	v.add_child(top)
-	var title := _label("ARILIK", 64, AMBER, true, true)
+	var title := _label("ARICILIK", 64, AMBER, true, true)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_child(title)
-	# the honey in hand, the one number this screen is about
 	var purse := PanelContainer.new()
 	var ps := _style(Color(BARK, 0.95), AMBER, 2, 16, 8)
 	ps.content_margin_left = 18
@@ -559,13 +628,11 @@ func _refresh_hive() -> void:
 		t.cost.text = "TAM" if full else str(def.cost[lv])
 		t.cost.add_theme_color_override("font_color", TEAL if full else (INK if can else Color(0.62, 0.56, 0.5)))
 		t.chip.add_theme_stylebox_override("panel", chip_full if full else (chip_buy if can else chip_wait))
-		# what cannot be bought yet steps back, what is bought out stays bright
 		t.badge.modulate.a = 1.0 if (can or full) else 0.6
 		t.mid.modulate.a = 1.0 if (can or full) else 0.72
 		t.button.disabled = not can
 
 func _buy(id: String) -> void:
-	# a double click on the button that opened the apiary must not land on a tile and spend honey
 	if Time.get_ticks_msec() - hive_opened < 400:
 		return
 	if main.buy_meta(id):
@@ -593,7 +660,7 @@ func close_hive() -> void:
 		hive_btn.grab_focus()
 
 func _menu_texts() -> void:
-	hive_btn.text = "Arılık  ·  %s bal" % fmt_int(main.honey)
+	hive_btn.text = "Arıcılık  ·  %s bal" % fmt_int(main.honey)
 
 # ---------- main menu
 
@@ -608,8 +675,8 @@ func _build_menu() -> void:
 	menu.add_child(shade)
 	var v := VBoxContainer.new()
 	v.set_anchors_preset(Control.PRESET_CENTER_LEFT)
-	v.position = Vector2(140, -400)
-	v.add_theme_constant_override("separation", 16)
+	v.position = Vector2(140, -430)
+	v.add_theme_constant_override("separation", 14)
 	menu.add_child(v)
 	var logo := VBoxContainer.new()
 	logo.add_theme_constant_override("separation", -34)
@@ -619,12 +686,13 @@ func _build_menu() -> void:
 	menu_record = _label("", 28, CREAM, false, true)
 	v.add_child(menu_record)
 	var sp := Control.new()
-	sp.custom_minimum_size = Vector2(0, 14)
+	sp.custom_minimum_size = Vector2(0, 10)
 	v.add_child(sp)
 	var start := _button("Başla", func(): main.start_run(), true)
 	start.name = "Basla"
-	hive_btn = _button("Arılık", func(): open_hive())
-	for b in [start, hive_btn, _button("Ayarlar", func(): open_settings()), _button("Çıkış", func(): main.quit_game())]:
+	hive_btn = _button("Arıcılık", func(): open_hive())
+	story_btn = _button("Hikaye", func(): open_story(false))
+	for b in [start, hive_btn, story_btn, _button("Ayarlar", func(): open_settings()), _button("Çıkış", func(): main.quit_game())]:
 		b.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 		v.add_child(b)
 		menu_btns.append(b)
@@ -632,22 +700,22 @@ func _build_menu() -> void:
 func show_menu() -> void:
 	close_settings()
 	close_hive()
+	close_story()
 	_menu_texts()
 	menu.visible = true
 	hud.visible = false
 	pause_panel.visible = false
 	choice_panel.visible = false
-	# the menu can be reached from the pause menu over the card panel: no choice stays open behind it
 	choosing = false
 	end_panel.visible = false
 	var r: Dictionary = main.record
 	if r.get("runs", 0) > 0:
-		var s := "En uzun tur %s, %s böcek" % [fmt_time(r.get("best_time", 0.0)), fmt_int(r.get("best_kills", 0))]
+		var s := "En iyi: Döngü %d · %s · %s böcek" % [int(r.get("best_loop", 1)), fmt_time(r.get("best_time", 0.0)), fmt_int(r.get("best_kills", 0))]
 		if r.get("wins", 0) > 0:
-			s += ", Kraliçe %d kez devrildi" % r.wins
+			s += " · %d Kraliçe" % int(r.wins)
 		menu_record.text = s
 	else:
-		menu_record.text = "Kraliçe 10. dakikada geliyor"
+		menu_record.text = "Sonsuz nöbet · Kraliçe her 10 dakikada uyanır"
 	(menu.find_child("Basla", true, false) as Button).grab_focus()
 
 # ---------- pause
@@ -667,7 +735,7 @@ func _build_pause() -> void:
 	var outer := VBoxContainer.new()
 	outer.add_theme_constant_override("separation", 24)
 	p.add_child(outer)
-	outer.add_child(_label("Duraklatıldı", 44, AMBER))
+	outer.add_child(_title_with_version("Duraklatıldı", 44))
 	var h := HBoxContainer.new()
 	h.add_theme_constant_override("separation", 48)
 	outer.add_child(h)
@@ -735,7 +803,6 @@ func _build_choice() -> void:
 		box.add_theme_constant_override("separation", 0)
 		box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		b.add_child(box)
-		# the band across the top says what kind of card this is, by colour and by word
 		var strip := PanelContainer.new()
 		var band := StyleBoxFlat.new()
 		band.bg_color = AMBER
@@ -787,7 +854,6 @@ func _build_choice() -> void:
 		ds.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		ds.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		body.add_child(ds)
-		# what this card still needs for an evolution: its partner's icon and the condition in words
 		var line := ColorRect.new()
 		line.color = Color(WAX, 0.45)
 		line.custom_minimum_size = Vector2(0, 2)
@@ -807,7 +873,6 @@ func _build_choice() -> void:
 		ev.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		foot.add_child(ev)
 		cards.append({"button": b, "box": box, "band": band, "kind": kind, "badge": badge, "name": nm, "pips": pips, "level": lv, "desc": ds, "line": line, "foot": foot, "pair": pair, "evo": ev})
-	# a few times per run the three cards can be drawn again
 	reroll_btn = _button("Yenile", func(): _reroll())
 	reroll_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	reroll_btn.focus_mode = Control.FOCUS_NONE
@@ -822,7 +887,6 @@ func _reroll() -> void:
 func show_choice(kind: String, list: Array, again := false) -> void:
 	choosing = true
 	choice_lock = 0.25 if again else 0.45
-	# a slow motion beat must not slow the panel too: the game picks it up again when the tree resumes
 	Engine.time_scale = main.debug_speed
 	reroll_btn.text = "Yenile (R)  ·  %d" % main.game.rerolls
 	reroll_btn.disabled = main.game.rerolls <= 0
@@ -835,8 +899,7 @@ func show_choice(kind: String, list: Array, again := false) -> void:
 		var u: Dictionary = list[i]
 		var c: Dictionary = cards[i]
 		var l: int = main.game.level_of(u.id)
-		# a chest applies the chosen upgrade twice
-		var twice: bool = kind == "chest" and l + 1 < u.max
+		var twice: bool = kind == "chest" and u.id != "sifa" and l + 1 < u.max
 		var tone := AMBER
 		c.name.text = u.name
 		c.desc.text = u.desc[l] if u.kind == "w" else u.desc
@@ -863,7 +926,6 @@ func show_choice(kind: String, list: Array, again := false) -> void:
 		c.band.bg_color = tone
 		_set_badge(c.badge, icons.get(u.icon), tone)
 		c.name.add_theme_color_override("font_color", AMBER if u.kind == "e" else CREAM)
-		# the evolution partner of this card: a trait for a weapon, a weapon for a trait
 		var partner: String = "" if not levelled else main.game.evo_partner(u.id)
 		var need_text := ""
 		var met := false
@@ -890,12 +952,10 @@ func show_choice(kind: String, list: Array, again := false) -> void:
 	get_tree().paused = true
 	main.audio.play("chest" if kind == "chest" else "levelup")
 	main.release_mouse()
-	# no card takes keyboard focus: a jump key held through the level-up must not pick one
 	var held := get_viewport().gui_get_focus_owner()
 	if held != null:
 		held.release_focus()
 
-# Bot telemetry: a card whose text needs more room than the card has.
 func _check_cards() -> void:
 	await get_tree().process_frame
 	for i in mini(cards.size(), card_data.size()):
@@ -919,7 +979,6 @@ func _choose(i: int) -> void:
 	if main.game.queue.is_empty():
 		get_tree().paused = false
 		main.capture_mouse()
-		# play resumes with breathing room: the crowd is shoved back and the first hit is forgiven
 		main.weapons.push_back(main.player.pos, 6.5, 16.0)
 		main.player.inv_t = maxf(main.player.inv_t, 0.5)
 	else:
@@ -948,11 +1007,11 @@ func _build_end() -> void:
 	v.add_child(h)
 	for k in 2:
 		var p := PanelContainer.new()
-		p.custom_minimum_size = Vector2(540, 400)
+		p.custom_minimum_size = Vector2(540, 420)
 		p.add_theme_stylebox_override("panel", _style(Color(BARK, 0.97), Color(WAX, 0.8), 2, 26, 28))
 		h.add_child(p)
 		var box := VBoxContainer.new()
-		box.add_theme_constant_override("separation", 10)
+		box.add_theme_constant_override("separation", 8)
 		p.add_child(box)
 		if k == 0:
 			end_stats = box
@@ -967,7 +1026,7 @@ func _build_end() -> void:
 	v.add_child(bh)
 	end_again = _button("Bir tur daha (Enter)", func(): main.start_run(), true)
 	bh.add_child(end_again)
-	end_hive = _button("Arılık", func():
+	end_hive = _button("Arıcılık", func():
 		main.to_menu()
 		open_hive())
 	bh.add_child(end_hive)
@@ -978,39 +1037,39 @@ func _build_end() -> void:
 
 func _stat_row(parent: Container, name: String, value: String, col := CREAM) -> void:
 	var row := HBoxContainer.new()
-	var a := _label(name, 26, MUTED, false)
+	var a := _label(name, 24, MUTED, false)
 	a.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(a)
-	row.add_child(_label(value, 28, col))
+	row.add_child(_label(value, 26, col))
 	parent.add_child(row)
 
-func show_end(victory: bool, new_record: bool) -> void:
+func show_end(_victory: bool, new_record: bool) -> void:
 	var g = main.game
 	hud.visible = false
-	end_title.text = "KRALİÇE DEVRİLDİ" if victory else "KOVAN DÜŞTÜ"
-	end_title.add_theme_color_override("font_color", AMBER if victory else Color(1.0, 0.42, 0.36))
+	end_title.text = "KOVAN DÜŞTÜ"
+	end_title.add_theme_color_override("font_color", Color(1.0, 0.42, 0.36))
 	for c in end_stats.get_children():
 		c.queue_free()
 	for c in end_damage.get_children():
 		c.queue_free()
-	_stat_row(end_stats, "Süre", fmt_time(g.time), AMBER if new_record else CREAM)
+	_stat_row(end_stats, "Ulaşılan döngü", "Döngü %d" % g.loop, AMBER)
+	_stat_row(end_stats, "Toplam süre", fmt_time(g.time), AMBER if new_record else CREAM)
+	_stat_row(end_stats, "Devrilen Kraliçe", str(g.boss_kills), AMBER if g.boss_kills > 0 else CREAM)
 	_stat_row(end_stats, "Öldürülen böcek", fmt_int(g.kills))
 	_stat_row(end_stats, "Seviye", str(g.level))
 	_stat_row(end_stats, "Verilen hasar", fmt_int(g.stats.dealt))
 	_stat_row(end_stats, "Alınan hasar", fmt_int(g.stats.taken))
 	_stat_row(end_stats, "Açılan sandık", str(g.stats.chests))
-	_stat_row(end_stats, "Uyanan sunak", "%d / 4" % g.stats.shrines)
+	_stat_row(end_stats, "Uyanan sunak", str(g.stats.shrines))
 	_stat_row(end_stats, "Kazanılan bal", "+%d" % main.last_honey, AMBER)
 	if new_record:
-		_stat_row(end_stats, "Yeni rekor", fmt_time(g.time), AMBER)
-	# damage share per weapon, biggest first
+		_stat_row(end_stats, "Yeni süre rekoru", fmt_time(g.time), AMBER)
 	var by: Dictionary = g.stats.by
 	var keys: Array = by.keys()
 	keys.sort_custom(func(a, b): return by[a] > by[b])
 	var top := 1.0
 	if not keys.is_empty():
 		top = maxf(1.0, by[keys[0]])
-	# a run that dealt no damage has no shares to show
 	(end_damage.get_parent() as Control).visible = not keys.is_empty()
 	for k in keys:
 		var row := VBoxContainer.new()
@@ -1028,12 +1087,10 @@ func show_end(victory: bool, new_record: bool) -> void:
 		row.add_child(bar)
 		end_damage.add_child(row)
 	end_panel.visible = true
-	# the buttons wake up a moment later, so keys still held from the fight cannot skip the screen
 	end_lock = 1.2
 	end_again.disabled = true
 	end_menu.disabled = true
 	end_hive.disabled = true
-	# the next thing to play for: the cheapest apiary upgrade still open
 	var goal_name := ""
 	var goal_cost := 0
 	for def in g.META:
@@ -1041,9 +1098,9 @@ func show_end(victory: bool, new_record: bool) -> void:
 		if mlv < def.cost.size() and (goal_name == "" or int(def.cost[mlv]) < goal_cost):
 			goal_name = def.name
 			goal_cost = int(def.cost[mlv])
-	end_hive.text = "Arılık  ·  %d bal" % main.honey
+	end_hive.text = "Arıcılık  ·  %d bal" % main.honey
 	if goal_name == "":
-		end_goal.text = "Arılık'taki bütün geliştirmeler alındı"
+		end_goal.text = "Arıcılık'taki bütün geliştirmeler alındı"
 	elif main.honey >= goal_cost:
 		end_goal.text = "Balın %s geliştirmesine yetiyor" % goal_name
 	else:
@@ -1063,13 +1120,10 @@ func _process(dt: float) -> void:
 	if end_panel.visible and end_lock > 0.0:
 		end_lock -= dt
 		if end_lock <= 0.0:
-			# no button takes focus: nothing on this screen reacts to the jump key
 			end_again.disabled = false
 			end_menu.disabled = false
 			end_hive.disabled = false
-	# hints and toasts wait while the game is paused, so a level-up cannot swallow them
 	if not get_tree().paused:
-		# a toast waits for a banner to clear instead of running out behind it
 		if toast_t > 0.0 and banner_t <= 0.0:
 			toast_t -= dt
 		if banner_t > 0.0:
@@ -1078,13 +1132,12 @@ func _process(dt: float) -> void:
 		if ult_flash > 0.0:
 			ult_flash -= dt
 		for hm in hurt_marks:
-			hm[2] -= dt / maxf(0.05, Engine.time_scale / main.debug_speed)
-		while not hurt_marks.is_empty() and hurt_marks[0][2] <= 0.0:
+			hm.t -= dt / maxf(0.05, Engine.time_scale / main.debug_speed)
+		while not hurt_marks.is_empty() and hurt_marks[0].t <= 0.0:
 			hurt_marks.pop_front()
 	if hud.visible:
 		hud.queue_redraw()
 
-# The bot plays like a sensible player: evolutions first, then weapons most of the time, else anything.
 func bot_pick(list: Array) -> int:
 	var pick := randi() % 3
 	for want in (["w", "e"] if randf() < 0.6 else ["e"]):
@@ -1095,7 +1148,6 @@ func bot_pick(list: Array) -> int:
 
 func _input(ev: InputEvent) -> void:
 	if end_panel.visible and end_lock <= 0.0 and ev is InputEventKey and ev.pressed and not ev.echo:
-		# the end screen restarts on Enter only: the jump key held through a death must not skip it
 		var ek: int = (ev as InputEventKey).physical_keycode
 		if ek == KEY_ENTER or ek == KEY_KP_ENTER:
 			get_viewport().set_input_as_handled()
@@ -1114,6 +1166,7 @@ func _input(ev: InputEvent) -> void:
 
 func start_hud() -> void:
 	close_settings()
+	close_story()
 	menu.visible = false
 	end_panel.visible = false
 	pause_panel.visible = false
@@ -1127,7 +1180,6 @@ func start_hud() -> void:
 	ult_flash = 0.0
 
 func _text(c: CanvasItem, pos: Vector2, s: String, size: int, col: Color, align := HORIZONTAL_ALIGNMENT_LEFT, width := -1.0) -> void:
-	# every distinct size makes the font build another glyph atlas, so animated sizes move in coarse steps
 	if size > 80:
 		size = (size >> 3) << 3
 	elif size > 40:
@@ -1135,7 +1187,6 @@ func _text(c: CanvasItem, pos: Vector2, s: String, size: int, col: Color, align 
 	c.draw_string_outline(font_bold, pos, s, align, width, size, maxi(5, size / 5), Color(INK, col.a))
 	c.draw_string(font_bold, pos, s, align, width, size, col)
 
-# A bar with pointed ends; the fill is the same shape cut off at its fraction.
 func _lozenge(r: Rect2, k: float) -> PackedVector2Array:
 	var m := r.position.y + r.size.y * 0.5
 	return PackedVector2Array([Vector2(r.position.x + k, r.position.y), Vector2(r.end.x - k, r.position.y), Vector2(r.end.x, m),
@@ -1155,7 +1206,6 @@ func _bar(c: CanvasItem, r: Rect2, frac: float, col: Color, bg := Color(0.1, 0.0
 			if poly.size() >= 3:
 				c.draw_colored_polygon(poly, col)
 
-# A small round counter pinned to the corner of a cell.
 func _chip(c: CanvasItem, at: Vector2, r: float, s: String, col: Color) -> void:
 	c.draw_circle(at, r, INK)
 	c.draw_arc(at, r, 0, TAU, 24, col, 2.0, true)
@@ -1177,7 +1227,6 @@ func _draw_hud() -> void:
 	var W := hud.size.x
 	var H := hud.size.y
 	var now := Time.get_ticks_msec() * 0.001
-	# experience across the top, the level in a cell hanging from it
 	hud.draw_rect(Rect2(0, 0, W, 15), Color(0.05, 0.035, 0.025, 0.88))
 	hud.draw_rect(Rect2(0, 0, W * clampf(float(g.xp) / float(g.xp_need), 0.0, 1.0), 12), AMBER)
 	var lc := Vector2(70, 74)
@@ -1187,34 +1236,31 @@ func _draw_hud() -> void:
 	if icons.get(28) != null:
 		hud.draw_texture_rect(icons[28], Rect2(128, 52, 44, 44), false)
 	_text(hud, Vector2(180, 86), fmt_int(g.kills), 30, CREAM)
-	# clock or boss bar
 	var b: int = en.boss_index()
 	var ch: int = en.champ_index()
 	if b >= 0:
-		_text(hud, Vector2(W * 0.5 - 300, 62), "KRALİÇE", 36, Color(1.0, 0.38, 0.32), HORIZONTAL_ALIGNMENT_CENTER, 600)
+		_text(hud, Vector2(W * 0.5 - 320, 62), "KRALİÇE · DÖNGÜ %d" % g.loop, 36, Color(1.0, 0.38, 0.32), HORIZONTAL_ALIGNMENT_CENTER, 640)
 		_bar(hud, Rect2(W * 0.5 - 360, 78, 720, 24), en.hp[b] / en.maxhp[b], Color(0.9, 0.16, 0.2))
+		_text(hud, Vector2(W * 0.5 - 160, 134), fmt_time(g.time), 26, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 320)
 	else:
-		if ch >= 0:
-			# a champion's bar sits under the clock, the countdown to the queen keeps running
-			_text(hud, Vector2(W * 0.5 - 300, 134), g.CHAMP_NAMES[en.typ[ch] - en.T_STAG], 28, Color(1.0, 0.62, 0.3), HORIZONTAL_ALIGNMENT_CENTER, 600)
-			_bar(hud, Rect2(W * 0.5 - 260, 146, 520, 18), en.hp[ch] / en.maxhp[ch], Color(0.95, 0.46, 0.15))
-		var left: float = g.BOSS_TIME - g.time
+		var left: float = g.CYCLE_TIME - g.loop_time
 		var col := CREAM if left > 30.0 else Color(1.0, 0.45, 0.35)
-		var secs := int(ceil(maxf(0.0, left)))
-		# the digits hang from the colon, so the clock does not shuffle sideways as they change width
+		var total_secs := int(floor(g.time))
 		@warning_ignore("integer_division")
-		_text(hud, Vector2(W * 0.5 - 212, 84), "%02d" % (secs / 60), 60, col, HORIZONTAL_ALIGNMENT_RIGHT, 200)
-		_text(hud, Vector2(W * 0.5 - 12, 80), ":", 60, col, HORIZONTAL_ALIGNMENT_CENTER, 24)
-		_text(hud, Vector2(W * 0.5 + 12, 84), "%02d" % (secs % 60), 60, col, HORIZONTAL_ALIGNMENT_LEFT, 200)
-	# health and slide
+		_text(hud, Vector2(W * 0.5 - 212, 76), "%02d" % (total_secs / 60), 56, CREAM, HORIZONTAL_ALIGNMENT_RIGHT, 200)
+		_text(hud, Vector2(W * 0.5 - 12, 72), ":", 56, CREAM, HORIZONTAL_ALIGNMENT_CENTER, 24)
+		_text(hud, Vector2(W * 0.5 + 12, 76), "%02d" % (total_secs % 60), 56, CREAM, HORIZONTAL_ALIGNMENT_LEFT, 200)
+		_text(hud, Vector2(W * 0.5 - 260, 108), "DÖNGÜ %d  ·  Kraliçe %s" % [g.loop, fmt_time(ceil(maxf(0.0, left)))], 22, AMBER if left > 30.0 else col, HORIZONTAL_ALIGNMENT_CENTER, 520)
+		if ch >= 0:
+			_text(hud, Vector2(W * 0.5 - 300, 146), g.CHAMP_NAMES[en.typ[ch] - en.T_STAG], 26, Color(1.0, 0.62, 0.3), HORIZONTAL_ALIGNMENT_CENTER, 600)
+			_bar(hud, Rect2(W * 0.5 - 260, 158, 520, 18), en.hp[ch] / en.maxhp[ch], Color(0.95, 0.46, 0.15))
 	var hw := 460.0
 	var hr := Rect2(W * 0.5 - hw * 0.5, H - 78, hw, 30)
 	var hp_frac: float = pl.hp / pl.max_hp
 	_bar(hud, hr, hp_frac, Color(0.36, 0.82, 0.3) if hp_frac > 0.3 else Color(0.95, 0.27, 0.2))
 	_text(hud, Vector2(hr.position.x, hr.position.y + 23), "%d / %d" % [int(ceil(pl.hp)), int(pl.max_hp)], 22, Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER, hw)
-	var sl := 1.0 - clampf(pl.slide_cd / 1.0, 0.0, 1.0)
+	var sl := 1.0 - clampf(pl.slide_cd / pl.slide_cd_max(), 0.0, 1.0)
 	_bar(hud, Rect2(W * 0.5 - hw * 0.5 + 20, H - 36, hw - 40, 8), sl, TEAL if sl >= 1.0 else Color(0.2, 0.5, 0.55))
-	# the hive call: a cell that fills with honey, and rings out when it is ready
 	var uc := Vector2(W * 0.5 + hw * 0.5 + 78, H - 62)
 	var ur := 46.0
 	var ready: bool = g.ult >= 1.0
@@ -1235,14 +1281,12 @@ func _draw_hud() -> void:
 		_draw_hex(hud, uc, ur + 30.0 * wave, Color(0, 0, 0, 0), Color(1.0, 0.86, 0.45, 0.8 * (1.0 - wave)), 3.0)
 	_key(hud, uc + Vector2(38, 34), 17.0 + (2.0 * beat if ready else 0.0), "Q", ready)
 	if ult_flash > 0.0 and ready:
-		# said once in the middle of the screen's lower half, where the eyes are in a fight
 		var fa := clampf(ult_flash, 0.0, 1.0) * clampf((6.0 - ult_flash) * 5.0, 0.0, 1.0)
 		var fr := Rect2(W * 0.5 - 215, H - 190, 430, 58)
 		hud.draw_colored_polygon(_lozenge(fr.grow(3), 32.0), Color(HONEY, 0.9 * fa))
 		hud.draw_colored_polygon(_lozenge(fr, 29.0), Color(INK, 0.92 * fa))
 		_key(hud, Vector2(fr.position.x + 62, fr.position.y + 29), 19.0, "Q", true, fa)
 		hud.draw_string(font_bold, Vector2(fr.position.x + 96, fr.position.y + 39), "Kovan Çağrısı hazır", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, Color(CREAM, fa))
-	# weapons and traits
 	var x := 66.0
 	for id in main.weapons.IDS:
 		var l: int = main.weapons.levels[id]
@@ -1253,21 +1297,25 @@ func _draw_hud() -> void:
 		_draw_badge(hud, Vector2(x, H - 66), 42.0, icons.get(u.icon), tone)
 		_chip(hud, Vector2(x + 29, H - 36), 15.0, str(l), tone)
 		x += 92.0
-	x = 52.0
+	var pi := 0
 	for id in g.passives:
 		var u2: Dictionary = g.upg(id)
-		_draw_badge(hud, Vector2(x, H - 150), 26.0, icons.get(u2.icon), TEAL)
-		_chip(hud, Vector2(x + 18, H - 131), 11.0, str(g.passives[id]), TEAL)
-		x += 60.0
+		@warning_ignore("integer_division")
+		var prow := pi / 6
+		var pcol := pi % 6
+		var px := 52.0 + float(pcol) * 60.0
+		var py := H - 150.0 - float(prow) * 60.0
+		_draw_badge(hud, Vector2(px, py), 26.0, icons.get(u2.icon), TEAL)
+		_chip(hud, Vector2(px + 18, py + 19), 11.0, str(g.passives[id]), TEAL)
+		pi += 1
 	_draw_minimap(W)
-	# where the last hits came from, as arcs around the middle of the screen (top = ahead of the camera)
 	var hyaw: float = pl.cam_yaw
 	for hm in hurt_marks:
-		var hr2 := Vector2(hm[0] - pl.pos.x, hm[1] - pl.pos.z)
-		if hr2.length() < 0.4 or hm[2] <= 0.0:
+		var hr2 := Vector2(hm.x - pl.pos.x, hm.z - pl.pos.z)
+		if hr2.length() < 0.4 or hm.t <= 0.0:
 			continue
 		var hang := atan2(hr2.x * sin(hyaw) + hr2.y * cos(hyaw), hr2.x * cos(hyaw) - hr2.y * sin(hyaw))
-		var hal := clampf(float(hm[2]) * 1.6, 0.0, 1.0)
+		var hal := clampf(float(hm.t) * 1.6, 0.0, 1.0)
 		hud.draw_arc(Vector2(W * 0.5, H * 0.5), H * 0.34, hang - 0.42, hang + 0.42, 18, Color(1.0, 0.12, 0.1, 0.8 * hal), 20.0)
 		hud.draw_arc(Vector2(W * 0.5, H * 0.5), H * 0.34 + 14.0, hang - 0.3, hang + 0.3, 14, Color(1.0, 0.55, 0.4, 0.9 * hal), 5.0)
 	if main.world.shrine_progress >= 0.0:
@@ -1288,8 +1336,6 @@ func _draw_hud() -> void:
 		_text(hud, Vector2(W * 0.5 - 700, H - 122), "WASD koş     Boşluk zıpla     Shift kay     Q dolunca Kovan Çağrısı", 26, Color(1, 1, 1, ha), HORIZONTAL_ALIGNMENT_CENTER, 1400)
 
 func _draw_minimap(W: float) -> void:
-	# a radar: the keeper in the middle, the camera's forward at the top, 42 m to the rim,
-	# so the swarm closing in from behind shows at the bottom
 	var c := Vector2(W - 128, 138)
 	var R := 100.0
 	var sc := R / 42.0
@@ -1300,7 +1346,6 @@ func _draw_minimap(W: float) -> void:
 	var o := Vector2(pl.pos.x, pl.pos.z)
 	hud.draw_circle(c, R + 6, Color(0.07, 0.05, 0.035, 0.66))
 	hud.draw_arc(c, R + 4, 0, TAU, 56, Color(WAX, 0.95), 3.0, true)
-	# the arena wall, where a crowd pins you
 	var ar: float = main.world.ARENA_R
 	var prev := Vector2.ZERO
 	for k in 73:
@@ -1323,16 +1368,14 @@ func _draw_minimap(W: float) -> void:
 			var p: Vector2 = c + Vector2(sr.dot(ax), sr.dot(ay)).limit_length(R - 5.0)
 			hud.draw_colored_polygon(PackedVector2Array([p + Vector2(0, -7), p + Vector2(7, 0), p + Vector2(0, 7), p + Vector2(-7, 0)]), TEAL)
 	for ch in main.world.chests:
-		if not ch.open:
-			var cr := Vector2(ch.pos.x, ch.pos.z) - o
-			var p2: Vector2 = c + Vector2(cr.dot(ax), cr.dot(ay)).limit_length(R - 5.0)
-			hud.draw_rect(Rect2(p2 - Vector2(5, 5), Vector2(10, 10)), AMBER)
+		var cr := Vector2(ch.pos.x, ch.pos.z) - o
+		var p2: Vector2 = c + Vector2(cr.dot(ax), cr.dot(ay)).limit_length(R - 5.0)
+		hud.draw_rect(Rect2(p2 - Vector2(5, 5), Vector2(10, 10)), AMBER)
 	for j in main.world.jars:
-		if not j.taken:
-			var jr := Vector2(j.pos.x, j.pos.z) - o
-			var jp := Vector2(jr.dot(ax), jr.dot(ay))
-			if jp.length() < R:
-				hud.draw_circle(c + jp, 3.5, Color(1.0, 0.45, 0.5))
+		var jr := Vector2(j.pos.x, j.pos.z) - o
+		var jp := Vector2(jr.dot(ax), jr.dot(ay))
+		if jp.length() < R:
+			hud.draw_circle(c + jp, 3.5, Color(1.0, 0.45, 0.5))
 	for it in main.pickups.items:
 		var ir := Vector2(it.pos.x, it.pos.z) - o
 		hud.draw_circle(c + Vector2(ir.dot(ax), ir.dot(ay)).limit_length(R - 5.0), 5.0, AMBER if it.kind == "chest" else (Color(1.0, 0.45, 0.5) if it.kind == "heal" else Color(0.3, 0.8, 1.0)))
@@ -1346,6 +1389,5 @@ func _draw_minimap(W: float) -> void:
 		if en.elite[i] == 1 or en.typ[i] == en.T_BOSS or en.typ[i] >= en.T_STAG:
 			hud.draw_circle(c + ep.limit_length(R - 5.0), 5.0 if en.elite[i] == 1 else 8.0, Color(1.0, 0.2, 0.2))
 		elif ep.length_squared() < R * R:
-			# the swarm itself: one small dot per bug
 			hud.draw_rect(Rect2(c + ep - Vector2(1.5, 1.5), Vector2(3, 3)), dot)
 	hud.draw_colored_polygon(PackedVector2Array([c + Vector2(0, -10), c + Vector2(6.5, 6), c + Vector2(-6.5, 6)]), Color.WHITE)

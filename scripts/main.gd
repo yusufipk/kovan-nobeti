@@ -1,8 +1,7 @@
 extends Node
 # Root of the game: builds every system, owns the state (menu, run, pause, end) and the saved settings.
 
-# Plain JSON on purpose: it can only hold numbers, strings, arrays and dictionaries, so a tampered save
-# cannot make the engine build objects or load resources the way a ConfigFile can.
+const VERSION := "v1.1"
 const SAVE_PATH := "user://kovan_nobeti.json"
 const SETTING_RANGE := {"sens": [0.2, 3.0], "music": [0.0, 1.0], "sfx": [0.0, 1.0], "brightness": [0.6, 1.5]}
 
@@ -37,22 +36,18 @@ var paused := false
 var last_frame_us := 0
 var was_paused := false
 var settings := {"sens": 1.0, "music": 0.9, "sfx": 0.9, "brightness": 1.0}
-var record := {"runs": 0, "best_time": 0.0, "best_kills": 0, "wins": 0}
-# the apiary: honey in the bank, levels of the permanent upgrades, honey earned by the last run
+var record := {"runs": 0, "best_time": 0.0, "best_kills": 0, "wins": 0, "best_loop": 1}
 var honey := 0
 var meta := {}
 var last_honey := 0
-# fullscreen is a choice for this session only: it is never saved and never applied at startup,
-# so nothing but the player's own key press or click changes the window
+var story_seen := false
 var fullscreen := false
 var menu_yaw := 0.0
-# real seconds the simulation stays frozen after a heavy kill
 var hit_stop := 0.0
 var hit_stop_cd := 0.0
 
-# test hooks: the demo bot plays by itself and never touches the saved record
+# test hooks (debug builds only)
 var bot_mode := false
-# with --once a bot run quits when it ends, for balance runs from the command line
 var bot_once := false
 var debug_god := false
 var debug_speed := 1.0:
@@ -65,12 +60,13 @@ var debug_time := -1.0:
 		debug_time = v
 		if game != null and v >= 0.0:
 			game.time = v
+			game.loop = 1 + int(floor(v / game.CYCLE_TIME))
+			game.loop_time = fmod(v, game.CYCLE_TIME)
 			game.next_wave = (floor(v / 60.0) + 1.0) * 60.0
 			game.next_elite = v + 20.0
-			# champions whose time has clearly passed do not all turn up at once
 			game.champs_sent = 0
 			for ct in game.CHAMP_TIMES:
-				if v > ct + 5.0:
+				if game.loop_time > ct + 5.0:
 					game.champs_sent += 1
 var debug_levels := 0:
 	set(v):
@@ -80,13 +76,10 @@ var debug_levels := 0:
 				game.level += 1
 				game.xp_need = game._need(game.level)
 				if bot_mode and not ui.hold_choice:
-					# the bot takes its head start without sitting through the panels
 					var c: Array = game.choices()
 					game.apply(c[ui.bot_pick(c)].id)
 				else:
 					game.queue.append("level")
-# "choice" holds an upgrade panel open ("chest" a chest one, "evo" one with an evolution),
-# "pause" opens the pause menu, "settings" the settings panel of the main menu, "win" and "lose" end the run
 var debug_ui := "":
 	set(v):
 		debug_ui = v
@@ -96,8 +89,10 @@ var debug_ui := "":
 		if v == "hive" and ui != null:
 			ui.open_hive()
 			return
+		if v == "story" and ui != null:
+			ui.open_story(false)
+			return
 		if game == null or state != PLAY or not bot_mode:
-			# the test switches below change a run: they only work for the bot, which never saves
 			return
 		if v == "ult":
 			game.ult = 1.0
@@ -122,54 +117,14 @@ var debug_ui := "":
 			game._recalc()
 			game.evo_chests = 1
 			game.open_chest()
-		elif v == "keys":
-			_debug_keys()
-		elif v == "shrine":
-			_debug_shrine()
 		elif v == "pause":
 			toggle_pause()
 		elif v == "win":
-			game._win(player.pos)
+			game._on_boss_defeated(player.pos)
 		elif v == "lose":
 			player.hp = 0.0
 			player.alive = false
 			game.on_player_dead()
-# Test only: sends real key events through the input pipeline and prints what the game did with them.
-func _debug_press(key: int) -> void:
-	for down in [true, false]:
-		var e := InputEventKey.new()
-		e.physical_keycode = key
-		e.keycode = key
-		e.pressed = down
-		Input.parse_input_event(e)
-
-# Test only: lets a crowd gather, then puts the keeper on a shrine that is about to wake.
-func _debug_shrine() -> void:
-	await get_tree().create_timer(22.0, true, false, true).timeout
-	var s: Dictionary = world.shrines[0]
-	player.pos = s.pos + Vector3(1.0, 0, 0)
-	s.charge = 0.93
-	print("T SHRINE placed alive=%d" % enemies.count)
-
-func _debug_keys() -> void:
-	ui.hold_choice = true
-	game.queue.append("level")
-	var steps := [[1.5, KEY_ESCAPE, "esc on cards"], [1.0, KEY_1, "1 under pause"], [1.0, KEY_ESCAPE, "esc again"], [1.0, KEY_1, "1 on cards"]]
-	for s in steps:
-		await get_tree().create_timer(s[0], true, false, true).timeout
-		_debug_press(s[1])
-		await get_tree().create_timer(0.3, true, false, true).timeout
-		print("T KEY %s: choosing=%s pause_panel=%s tree_paused=%s" % [s[2], ui.choosing, ui.pause_panel.visible, get_tree().paused])
-	player.hp = 0.0
-	player.alive = false
-	game.on_player_dead()
-	for s2 in [[4.5, KEY_SPACE, "space on end screen"], [1.0, KEY_ENTER, "enter on end screen"]]:
-		await get_tree().create_timer(s2[0], true, false, true).timeout
-		var before := state
-		_debug_press(s2[1])
-		await get_tree().create_timer(0.4, true, false, true).timeout
-		print("T KEY %s: state %d -> %d time=%.1f" % [s2[2], before, state, game.time])
-
 var debug_start := false:
 	set(v):
 		debug_start = v
@@ -183,7 +138,6 @@ func _ready() -> void:
 	var want_time := -1.0
 	var want_levels := 0
 	var want_ui := ""
-	# the test flags only exist in debug builds: an exported release ignores them
 	var args := OS.get_cmdline_user_args() if OS.is_debug_build() else PackedStringArray()
 	for a in args:
 		if a == "--bot":
@@ -201,7 +155,6 @@ func _ready() -> void:
 		elif a.begins_with("--ui="):
 			want_ui = a.split("=")[1]
 	if not bot_mode:
-		# a hand-played run writes the real save, so the cheats only work for the bot
 		debug_god = false
 		debug_speed = 1.0
 	assets = Assets.new()
@@ -247,6 +200,8 @@ func _ready() -> void:
 		debug_levels = want_levels
 		if want_ui != "":
 			debug_ui = want_ui
+	elif not story_seen:
+		ui.open_story(true)
 
 func _setup_input() -> void:
 	var map := {
@@ -262,7 +217,6 @@ func _setup_input() -> void:
 			var ev := InputEventKey.new()
 			ev.physical_keycode = key
 			InputMap.action_add_event(action, ev)
-	# the hive call is also on the right mouse button
 	var mb := InputEventMouseButton.new()
 	mb.button_index = MOUSE_BUTTON_RIGHT
 	InputMap.action_add_event("ult", mb)
@@ -270,7 +224,6 @@ func _setup_input() -> void:
 func _num(v) -> bool:
 	return (typeof(v) == TYPE_FLOAT or typeof(v) == TYPE_INT) and is_finite(float(v))
 
-# Every value read from disk is checked for type and range: a broken or edited save falls back to defaults.
 func _load() -> void:
 	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
 	if f == null or f.get_length() > 65536:
@@ -290,21 +243,24 @@ func _load() -> void:
 				var v: float = clampf(float(r[k]), 0.0, 1.0e9)
 				if k == "best_time":
 					record[k] = v
+				elif k == "best_loop":
+					record[k] = maxi(1, int(v))
 				else:
 					record[k] = int(v)
 	if _num(data.get("bal")):
 		honey = int(clampf(float(data["bal"]), 0.0, 1.0e7))
-	var a = data.get("arilik")
+	var a = data.get("aricilik", data.get("arilik"))
 	if typeof(a) == TYPE_DICTIONARY:
 		for def in Game.META:
 			if _num(a.get(def.id)):
 				meta[def.id] = int(clampf(float(a[def.id]), 0.0, float(def.cost.size())))
+	if typeof(data.get("hikaye_goruldu")) == TYPE_BOOL:
+		story_seen = bool(data["hikaye_goruldu"])
 
 func save_settings() -> void:
 	if bot_mode:
 		return
-	var text := JSON.stringify({"ayarlar": settings, "rekor": record, "bal": honey, "arilik": meta}, "\t")
-	# written beside the save and swapped in, so a crash mid-write cannot truncate honey and upgrades
+	var text := JSON.stringify({"ayarlar": settings, "rekor": record, "bal": honey, "aricilik": meta, "hikaye_goruldu": story_seen}, "\t")
 	var tmp := SAVE_PATH + ".tmp"
 	var f := FileAccess.open(tmp, FileAccess.WRITE)
 	if f != null:
@@ -312,12 +268,10 @@ func save_settings() -> void:
 		f.close()
 		if DirAccess.rename_absolute(tmp, SAVE_PATH) == OK:
 			return
-	# no swap on this platform: write in place as before
 	f = FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f != null:
 		f.store_string(text)
 
-# Level of a permanent upgrade. The demo bot always plays without them, so balance runs stay comparable.
 func meta_lv(id: String) -> int:
 	return 0 if bot_mode else int(meta.get(id, 0))
 
@@ -381,7 +335,6 @@ func toggle_pause() -> void:
 	if state != PLAY or game.over:
 		return
 	if ui.choosing:
-		# the card panel already holds the tree: the pause menu just opens over it and closes back to it
 		paused = not paused
 		ui.show_pause(paused)
 		if not paused:
@@ -396,19 +349,18 @@ func toggle_pause() -> void:
 		save_settings()
 		capture_mouse()
 
-# A run left from the pause menu still counts toward the record.
 func leave_run() -> void:
 	if state != PLAY or bot_mode or game.over:
 		return
 	record.runs += 1
 	record.best_time = maxf(record.best_time, game.time)
 	record.best_kills = maxi(record.best_kills, game.kills)
+	record.best_loop = maxi(int(record.get("best_loop", 1)), game.loop)
+	record.wins += game.boss_kills
 	last_honey = game.honey_for_run(false)
 	honey += last_honey
 	save_settings()
 
-# Freezes the simulation for a moment. Ordinary heavy kills share a cooldown so a strong build
-# mowing through brutes does not turn into a stutter; always = true skips the cooldown.
 func stop_for(d: float, always := false) -> void:
 	if always or hit_stop_cd <= 0.0:
 		hit_stop = maxf(hit_stop, d)
@@ -418,7 +370,6 @@ func _notification(what: int) -> void:
 	if ui == null:
 		return
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
-		# a run must not go on behind another window
 		if state == PLAY and not paused and not bot_mode:
 			toggle_pause()
 	elif what == NOTIFICATION_WM_CLOSE_REQUEST:
@@ -431,8 +382,8 @@ func finish_run(victory: bool) -> void:
 	if not bot_mode:
 		honey += last_honey
 		record.runs += 1
-		if victory:
-			record.wins += 1
+		record.wins += game.boss_kills
+		record.best_loop = maxi(int(record.get("best_loop", 1)), game.loop)
 		if game.time > record.best_time:
 			record.best_time = game.time
 			new_record = record.runs > 1
@@ -454,20 +405,19 @@ func _unhandled_input(ev: InputEvent) -> void:
 		if state == PLAY and not paused and not ui.choosing:
 			game.try_ult()
 	elif ev.is_action_pressed("pause"):
-		if ui.settings_overlay.visible:
+		if ui.story_panel.visible:
+			ui.close_story()
+		elif ui.settings_overlay.visible:
 			ui.close_settings()
 		elif ui.hive_panel.visible:
 			ui.close_hive()
 		else:
 			toggle_pause()
 	elif ev is InputEventMouseMotion and state == PLAY and not paused and not ui.choosing and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		# screen_relative is in real pixels: plain relative is scaled with the window, which would tie
-		# the sensitivity to the window size
 		player.look((ev as InputEventMouseMotion).screen_relative)
 
 func _process(dt: float) -> void:
 	if bot_mode:
-		# bot runs report every long frame with what happened just before it
 		var now := Time.get_ticks_usec()
 		var ms := (now - last_frame_us) / 1000.0
 		last_frame_us = now
@@ -480,7 +430,6 @@ func _process(dt: float) -> void:
 		var real := dt / maxf(0.05, Engine.time_scale)
 		hit_stop_cd -= real
 		if hit_stop > 0.0:
-			# the world holds still, the camera and the keys do not
 			hit_stop -= real
 			player.buffer_input()
 			player.hold_camera(real)
@@ -489,7 +438,6 @@ func _process(dt: float) -> void:
 			bot.update(dt)
 		game.update(dt)
 	else:
-		# menu and end screen: a slow orbit around the keeper
 		menu_yaw += dt * 0.12
 		player.cam_yaw = menu_yaw
 		player.cam_pitch = -0.2

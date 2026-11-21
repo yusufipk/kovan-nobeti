@@ -16,11 +16,10 @@ func _goal(p: Vector2) -> Variant:
 	var best_d := 1e9
 	if pl.hp < pl.max_hp * 0.5:
 		for j in main.world.jars:
-			if not j.taken:
-				var d := p.distance_to(Vector2(j.pos.x, j.pos.z))
-				if d < best_d:
-					best_d = d
-					best = Vector2(j.pos.x, j.pos.z)
+			var d := p.distance_to(Vector2(j.pos.x, j.pos.z))
+			if d < best_d:
+				best_d = d
+				best = Vector2(j.pos.x, j.pos.z)
 		if best != null:
 			return best
 	for it in main.pickups.items:
@@ -42,11 +41,10 @@ func _goal(p: Vector2) -> Variant:
 	if best != null:
 		return best
 	for c in main.world.chests:
-		if not c.open:
-			var d4 := p.distance_to(Vector2(c.pos.x, c.pos.z))
-			if d4 < best_d:
-				best_d = d4
-				best = Vector2(c.pos.x, c.pos.z)
+		var d4 := p.distance_to(Vector2(c.pos.x, c.pos.z))
+		if d4 < best_d:
+			best_d = d4
+			best = Vector2(c.pos.x, c.pos.z)
 	for s in main.world.shrines:
 		if not s.done:
 			var d5 := p.distance_to(Vector2(s.pos.x, s.pos.z)) - 3.0
@@ -71,7 +69,6 @@ func update(dt: float) -> void:
 		var goal_dir := Vector2.ZERO
 		if goal != null and p.distance_to(goal) > 0.6:
 			goal_dir = (goal - p).normalized()
-		# the queen is fought by circling her inside weapon range
 		var bi: int = en.boss_index()
 		if bi < 0:
 			bi = en.champ_index()
@@ -81,7 +78,6 @@ func update(dt: float) -> void:
 			if bd > 0.1:
 				var radial := tb / bd
 				goal_dir = (radial.orthogonal() + radial * clampf((bd - 9.0) / 4.0, -1.5, 1.5)).normalized() * 1.6
-		# score a ring of headings: stay out of the crowd first, then go where the goal is
 		var best_s := -1e9
 		var best_dir := Vector2.ZERO
 		for k in DIRS:
@@ -100,30 +96,26 @@ func update(dt: float) -> void:
 				elif en.typ[i] == en.T_BOOM:
 					w *= 2.5
 				danger += w
-				# how much of the crowd lies ahead on this heading: keeps the bot kiting toward open ground
 				var to := e - p
 				var dl := maxf(1.0, to.length())
 				var c := dir.dot(to) / dl
 				if c > 0.0:
 					crowd += c * c / dl
 			var s := -danger * 3.0 - crowd * 0.55 + dir.dot(goal_dir) * 0.9 + dir.dot(last_dir) * 0.3
-			# the arena wall is where a crowd pins you: steer back toward the middle well before it
 			var far: float = (p + dir * 6.0).length() - (float(main.world.ARENA_R) - 20.0)
 			if far > 0.0:
 				s -= far * 0.5
-			# marked ground is about to be hit: stay out of circles and lanes
 			for wz in main.fx.warns:
-				var wc := Vector2(wz[0], wz[1])
+				var wc := Vector2(wz.x, wz.z)
 				var wd := 0.0
-				if wz[5] == 0:
-					wd = minf(q.distance_to(wc), q0.distance_to(wc)) - float(wz[2])
+				if wz.kind == 0:
+					wd = minf(q.distance_to(wc), q0.distance_to(wc)) - float(wz.r)
 				else:
-					var wdir := Vector2(sin(wz[6]), cos(wz[6]))
-					var along := clampf((q - wc).dot(wdir), 0.0, float(wz[7]))
-					wd = q.distance_to(wc + wdir * along) - float(wz[2])
+					var wdir := Vector2(sin(wz.yaw), cos(wz.yaw))
+					var along := clampf((q - wc).dot(wdir), 0.0, float(wz.length))
+					wd = q.distance_to(wc + wdir * along) - float(wz.r)
 				if wd < 1.0:
 					s -= 5.0 * (1.0 - wd)
-			# the great hive is a wall too: do not run into its trunk
 			var gh: Vector3 = main.world.GREAT
 			var into: float = gh.z + 2.5 - (p + dir * 4.0).distance_to(Vector2(gh.x, gh.y))
 			if into > 0.0:
@@ -133,7 +125,6 @@ func update(dt: float) -> void:
 				best_dir = dir
 		last_dir = best_dir
 	pl.bot_move = last_dir
-	# the hive call is spent like a player would: when cornered, when hurt, or on a champion
 	if main.game.ult >= 1.0:
 		var big: int = en.boss_index() if en.boss_index() >= 0 else en.champ_index()
 		var big_near: bool = big >= 0 and p.distance_to(Vector2(en.px[big], en.pz[big])) < 12.0
@@ -143,7 +134,6 @@ func update(dt: float) -> void:
 		pl.bot_jump = true
 	if close >= 4 and randf() < dt * 2.0:
 		pl.bot_slide = true
-	# spit is jumped over, like a player who sees it coming
 	if pl.on_ground:
 		for bi in en.bcount:
 			var bd := Vector2(en.bx[bi] - p.x, en.bz[bi] - p.y)
@@ -154,7 +144,6 @@ func update(dt: float) -> void:
 		var rd: float = absf(p.distance_to(Vector2(r.x, r.z)) - r.r)
 		if rd < 2.2 and pl.on_ground:
 			pl.bot_jump = true
-	# the camera drifts behind the direction of travel so recordings are watchable
 	if pl.bot_move.length() > 0.1:
 		var want := atan2(-pl.bot_move.x, -pl.bot_move.y)
 		pl.cam_yaw = lerp_angle(pl.cam_yaw, want, minf(1.0, dt * 0.8))

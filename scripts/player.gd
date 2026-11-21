@@ -5,6 +5,7 @@ const GRAVITY := 30.0
 const JUMP_V := 10.5
 const SLIDE_TIME := 0.55
 const SLIDE_SPEED := 17.0
+const BASE_PITCH := -0.62
 
 var main
 var pos := Vector3.ZERO
@@ -22,6 +23,7 @@ var inv_t := 0.0
 var hp := 100.0
 var alive := true
 var air_peak := 0.0
+var mercy_cd := 0.0
 
 # stats changed by upgrades
 var max_hp := 100.0
@@ -34,9 +36,15 @@ var slide_lv := 0
 
 # camera
 var cam_yaw := 0.0
-var cam_pitch := -0.6
+var cam_pitch := BASE_PITCH
 var cam_dist := 9.5
+var cam_y := 0.0
 var look_shift := 0.0
+var focus_pos := Vector3.ZERO
+var focus_t := 0.0
+var focus_len := 0.0
+var pitch_keep := BASE_PITCH
+var pitch_back := false
 var cam: Camera3D
 var model: Node3D
 var anim: AnimationPlayer
@@ -77,7 +85,6 @@ func setup(m) -> void:
 	add_child(blob)
 
 func reset() -> void:
-	# in front of the great hive, on the plaza
 	pos = Vector3(0, 0, 11.5)
 	vel = Vector3.ZERO
 	hp = 100.0
@@ -101,7 +108,6 @@ func reset() -> void:
 	cam_pitch = BASE_PITCH
 	pitch_back = false
 	mercy_cd = 0.0
-	# a run opens wide on the great hive and settles in above the keeper
 	cam_dist = 18.0 if main.state == main.PLAY else 6.8
 	look_shift = 0.0
 	focus_t = 0.0
@@ -111,13 +117,14 @@ func reset() -> void:
 	position = pos
 	_update_camera(1.0)
 
-# Menu and end screen: the keeper stands idle while the camera orbits.
+func slide_cd_max() -> float:
+	return maxf(0.25, 1.0 - 0.12 * slide_lv)
+
 func menu_idle(dt: float) -> void:
 	cam_dist = 6.2
 	look_shift = -2.0
 	if alive:
-		# on the end screen of a won run the keeper celebrates
-		_play("cheer" if (main.state == main.END and main.game.victory and anim != null and anim.has_animation("cheer")) else "idle", 0.25)
+		_play("cheer" if (main.state == main.END and main.game.boss_kills > 0 and anim != null and anim.has_animation("cheer")) else "idle", 0.25)
 		model.rotation = Vector3(0, facing, 0)
 	model.visible = true
 	position = pos
@@ -125,7 +132,6 @@ func menu_idle(dt: float) -> void:
 	_update_camera(dt)
 
 func look(rel: Vector2) -> void:
-	# the mouse wins over a camera that is drifting back from a staged shot, but not during the shot itself
 	if focus_t <= 0.0:
 		pitch_back = false
 	var s: float = main.settings.sens * 0.0032
@@ -148,13 +154,11 @@ func hurt(amount: float, fx: float, fz: float) -> bool:
 	hp -= a
 	inv_t = 0.6
 	if hp > 0.0 and not was_low and hp < max_hp * 0.3 and mercy_cd <= 0.0:
-		# the hit that leaves the keeper low buys real room and says so: a death should never come out of nowhere
 		mercy_cd = 20.0
 		inv_t = 1.3
 		main.weapons.push_back(pos, 6.5, 16.0, false)
 		main.game.slow(0.45, 0.4)
 		main.ui.toast("Canın azaldı, uzaklaş")
-	# a hit buys a moment of room instead of starting a chain of hits
 	main.weapons.push_back(pos, 3.6, 10.0, false)
 	main.game.stats.taken += a
 	main.fx.shake(0.45)
@@ -172,7 +176,6 @@ func hurt(amount: float, fx: float, fz: float) -> bool:
 		main.game.on_player_dead()
 	return true
 
-# Key presses that land on a frame the simulation skips (hit stop) are kept for the next one.
 func buffer_input() -> void:
 	if main.bot_mode:
 		return
@@ -180,19 +183,6 @@ func buffer_input() -> void:
 		jump_buf = 0.14
 	if Input.is_action_just_pressed("slide"):
 		slide_buf = 0.14
-
-# Camera only, for frames where the simulation is frozen.
-# For a staged moment the camera turns to a point in the world and narrows; the keeper stays in control.
-var focus_pos := Vector3.ZERO
-var focus_t := 0.0
-var focus_len := 0.0
-# the camera sits high enough behind the keeper that the swarm chasing them stays on screen
-const BASE_PITCH := -0.62
-# a staged shot tilts the camera; afterwards it drifts back to where the player had it
-var pitch_keep := BASE_PITCH
-var cam_y := 0.0
-var pitch_back := false
-var mercy_cd := 0.0
 
 func focus_on(p: Vector3, secs: float) -> void:
 	if focus_t <= 0.0 and not pitch_back:
@@ -202,7 +192,6 @@ func focus_on(p: Vector3, secs: float) -> void:
 	focus_len = secs
 	pitch_back = true
 
-# Takes real seconds (the world is held still); the camera code expects scaled time and converts back itself.
 func hold_camera(real: float) -> void:
 	_update_camera(real * Engine.time_scale)
 
@@ -216,7 +205,6 @@ func update(dt: float) -> void:
 	if not alive:
 		model.visible = true
 		if anim != null and anim.has_animation("die"):
-			# the fall plays at full speed even though the world has dropped into slow motion
 			_play("die", 0.05)
 			anim.speed_scale = 1.0 / maxf(0.05, Engine.time_scale)
 			model.rotation.x = 0.0
@@ -258,11 +246,10 @@ func update(dt: float) -> void:
 	jump_buf -= dt
 	slide_buf -= dt
 	coyote = 0.12 if on_ground else coyote - dt
-	# slide
 	if slide_buf > 0.0 and slide_cd <= 0.0 and slide_t <= 0.0 and on_ground:
 		slide_buf = 0.0
 		slide_t = SLIDE_TIME
-		slide_cd = 1.0 - 0.12 * slide_lv
+		slide_cd = slide_cd_max()
 		slide_dir = wish.normalized() if wish.length() > 0.2 else Vector3(sin(facing), 0, cos(facing))
 		slide_hit.clear()
 		inv_t = maxf(inv_t, 0.38)
@@ -273,7 +260,6 @@ func update(dt: float) -> void:
 		slide_t -= dt
 		var k := clampf(slide_t / SLIDE_TIME, 0.0, 1.0)
 		var sp := lerpf(move_speed * 1.05, SLIDE_SPEED + move_speed * 0.4, k)
-		# a little steering while sliding
 		slide_dir = (slide_dir + wish * dt * 2.5).normalized()
 		hv = slide_dir * sp
 		if slide_lv > 0:
@@ -282,7 +268,6 @@ func update(dt: float) -> void:
 		var target := wish * move_speed
 		var acc := 70.0 if on_ground else 28.0
 		hv = hv.move_toward(target, acc * dt)
-	# jump (also allowed out of a slide: keeps the speed)
 	if jump_buf > 0.0 and coyote > 0.0:
 		vel.y = JUMP_V
 		jump_buf = 0.0
@@ -294,7 +279,6 @@ func update(dt: float) -> void:
 			hv *= 1.08
 		main.audio.play("jump", 0.0, 1.0)
 	if not on_ground:
-		# every jump has the same height: it is a dodge, and it has to clear spit and shock rings every time
 		vel.y -= GRAVITY * dt
 	vel.x = hv.x
 	vel.z = hv.z
@@ -312,7 +296,6 @@ func update(dt: float) -> void:
 		vel.y = 0.0
 	else:
 		on_ground = false
-	# obstacles and arena edge
 	for o in main.world.obstacles:
 		var dx: float = pos.x - o.x
 		var dz: float = pos.z - o.y
@@ -328,7 +311,6 @@ func update(dt: float) -> void:
 		var rr := sqrt(r2)
 		pos.x = pos.x / rr * ar
 		pos.z = pos.z / rr * ar
-	# facing and animation
 	var flat := Vector3(vel.x, 0, vel.z)
 	var spd := flat.length()
 	if spd > 0.5:
@@ -354,14 +336,11 @@ func update(dt: float) -> void:
 	blob.position = Vector3(pos.x, 0.04, pos.z)
 	var bs := clampf(1.0 - pos.y * 0.12, 0.4, 1.0)
 	blob.scale = Vector3(bs, 1, bs)
-	# close behind the keeper while the field is quiet, pulling back as the swarm thickens
 	var want_d := 11.0 + 3.0 * clampf(main.enemies.count / 170.0, 0.0, 1.0)
-	# a champion or the queen is a fight to watch whole: the camera gives them room
 	if main.enemies.boss_uid >= 0:
 		want_d += 3.0
 	elif main.enemies.champ_uid >= 0:
 		want_d += 1.5
-	# the opening wide shot closes in faster than the camera breathes with the crowd
 	cam_dist = lerpf(cam_dist, want_d, minf(1.0, dt * (2.2 if cam_dist > want_d + 1.5 else 0.8)))
 	_update_camera(dt)
 
@@ -384,7 +363,6 @@ func _update_camera(dt: float) -> void:
 	if focus_t > 0.0 and dt < 1.0:
 		var real := dt / maxf(0.05, Engine.time_scale)
 		focus_t -= real
-		# eased at both ends: the orbit is rigid now, so a shot that started at full weight would cut
 		focus = clampf(focus_t * 1.5, 0.0, 1.0) * smoothstep(0.0, 0.35, focus_len - focus_t)
 		var to := focus_pos - pos
 		if Vector2(to.x, to.z).length() > 1.5:
@@ -394,7 +372,6 @@ func _update_camera(dt: float) -> void:
 		cam_pitch = lerpf(cam_pitch, pitch_keep, minf(1.0, dt * 2.5))
 		if absf(cam_pitch - pitch_keep) < 0.01:
 			pitch_back = false
-	# only the height is eased (a jump should not bounce the whole view); the orbit itself is rigid
 	cam_y = lerpf(cam_y, pos.y, minf(1.0, dt * 12.0)) if dt < 1.0 else pos.y
 	var target := Vector3(pos.x, cam_y + 1.3, pos.z) + Vector3(cos(cam_yaw), 0, -sin(cam_yaw)) * look_shift
 	if focus > 0.0:
@@ -402,8 +379,6 @@ func _update_camera(dt: float) -> void:
 	var back := Vector3(sin(cam_yaw) * cos(cam_pitch), -sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch))
 	var want := target + back * cam_dist
 	want.y = maxf(want.y, 0.6)
-	# The camera sits exactly where the mouse put it. It used to ease toward that spot, which made
-	# every turn trail behind the hand and keep drifting after the mouse had stopped.
 	cam.global_position = want
 	cam.look_at(target + Vector3(0, 0.3, 0), Vector3.UP)
 	cam.h_offset = sh.x

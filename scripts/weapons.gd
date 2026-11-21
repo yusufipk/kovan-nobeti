@@ -35,16 +35,16 @@ var aura_mat: ShaderMaterial
 var aura_pulse := 0.0
 var orbit_nodes: Array[MeshInstance3D] = []
 var orbit_angle := 0.0
-var bombs: Array = []
+var bombs: Array[Dictionary] = []
 var bomb_nodes: Array[MeshInstance3D] = []
 var bolt_nodes: Array[MeshInstance3D] = []
 var bolt_t: Array[float] = []
 var bolt_i := 0
-# sentry hives: [x, z, life left, shot cooldown]
-var turrets: Array = []
+# sentry hives: {"x", "z", "life", "cd"}
+var turrets: Array[Dictionary] = []
 var turret_nodes: Array[MeshInstance3D] = []
-# honey trail: [x, z, life left]
-var trail: Array = []
+# honey trail: {"x", "z", "life"}
+var trail: Array[Dictionary] = []
 var trail_last := Vector3(1e6, 0, 1e6)
 # the hive call: seconds of swarm left, its damage tick and the bees circling the keeper
 var ult_t := 0.0
@@ -70,7 +70,6 @@ func setup(m) -> void:
 	bi.custom_aabb = AABB(Vector3(-200, -5, -200), Vector3(400, 40, 400))
 	bi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(bi)
-	# smoke aura
 	aura = MeshInstance3D.new()
 	var q := QuadMesh.new()
 	q.size = Vector2(2, 2)
@@ -170,7 +169,6 @@ func update(dt: float) -> void:
 	var pl = main.player
 	var en = main.enemies
 	var p: Vector3 = pl.pos
-	# with the queen in reach, part of every volley goes for her instead of the nearest bug
 	var boss: int = en.boss_index()
 	if boss >= 0 and Vector2(en.px[boss] - p.x, en.pz[boss] - p.z).length() > 20.0:
 		boss = -1
@@ -230,8 +228,13 @@ func update(dt: float) -> void:
 				if t2 < 0:
 					break
 				any = true
-				bombs.append({"from": p + Vector3(0, 1.4, 0), "to": Vector3(en.px[t2], 0, en.pz[t2]), "t": -0.08 * k,
-					"dmg": 28.0 + 12.0 * b(l >= 2) + 22.0 * b(l >= 6) + 30.0 * b(l >= 7), "r": 3.3 * (1.3 if l >= 4 else 1.0) * (1.25 if l >= 7 else 1.0) * area_mult})
+				bombs.append({
+					"from": p + Vector3(0, 1.4, 0),
+					"to": Vector3(en.px[t2], 0, en.pz[t2]),
+					"t": -0.08 * k,
+					"dmg": 28.0 + 12.0 * b(l >= 2) + 22.0 * b(l >= 6) + 30.0 * b(l >= 7),
+					"r": 3.3 * (1.3 if l >= 4 else 1.0) * (1.25 if l >= 7 else 1.0) * area_mult,
+				})
 			timers.bomba = (3.2 * (0.75 if l >= 5 else 1.0) * cd_mult) if any else 0.3
 	_update_bombs(dt)
 	# --- orbiting stingers
@@ -280,7 +283,6 @@ func update(dt: float) -> void:
 			if bolt_t[k] <= 0.0:
 				bolt_nodes[k].visible = false
 
-# Sentry hives: planted where the keeper stands, each shoots the nearest bug until it runs dry.
 func _update_turrets(dt: float, p: Vector3) -> void:
 	var en = main.enemies
 	var l: int = levels.kule
@@ -289,49 +291,47 @@ func _update_turrets(dt: float, p: Vector3) -> void:
 		var life := 11.0
 		timers.kule -= dt
 		if timers.kule <= 0.0 and main.player.on_ground:
-			# planted in turn, so their lives overlap and one is always fresh
 			timers.kule = life / most * maxf(0.6, cd_mult)
 			if turrets.size() >= most:
 				_turret_gone(turrets.pop_front())
-			turrets.append([p.x, p.z, life, 0.3])
+			turrets.append({"x": p.x, "z": p.z, "life": life, "cd": 0.3})
 			main.fx.burst(Vector3(p.x, 0.6, p.z), Color(1.0, 0.8, 0.3), 10, 4.0)
 			main.audio.play("land", -4.0, 1.4)
-	var rng := 10.0 * (1.3 if l >= 5 else 1.0)
+	var range_m := 10.0 * (1.3 if l >= 5 else 1.0)
 	var d := 9.0 + 5.0 * b(l >= 2) + 6.0 * b(l >= 5) + 8.0 * b(l >= 6) + 12.0 * b(l >= 7)
 	var gap := 0.55 * (0.7 if l >= 4 else 1.0) * maxf(0.5, cd_mult)
-	var keep: Array = []
+	var keep: Array[Dictionary] = []
 	for t in turrets:
-		t[2] -= dt
-		if t[2] <= 0.0:
+		t.life -= dt
+		if t.life <= 0.0:
 			_turret_gone(t)
 			continue
 		keep.append(t)
-		t[3] -= dt
-		if t[3] <= 0.0:
-			var e: int = en.nearest(t[0], t[1], rng)
+		t.cd -= dt
+		if t.cd <= 0.0:
+			var e: int = en.nearest(t.x, t.z, range_m)
 			if e >= 0:
-				t[3] = gap
-				var from := Vector3(t[0], 1.7, t[1])
+				t.cd = gap
+				var from := Vector3(t.x, 1.7, t.z)
 				var to := Vector3(en.px[e], en.height_of(e) + 0.5, en.pz[e])
 				_tracer(from, to)
 				var dir := (to - from).normalized()
 				deal(e, d, dir.x * 3.0, dir.z * 3.0, "kule")
 				main.audio.play("shoot", -10.0, randf_range(1.4, 1.7))
 			else:
-				t[3] = 0.15
+				t.cd = 0.15
 	turrets = keep
 	for k in turret_nodes.size():
 		var node := turret_nodes[k]
 		node.visible = k < turrets.size()
 		if node.visible:
-			var tt: Array = turrets[k]
-			# it pops out of the ground, and sinks a little as it runs dry
-			var grow := clampf((11.0 - float(tt[2])) * 5.0, 0.0, 1.0) * clampf(float(tt[2]) * 2.0, 0.3, 1.0)
-			node.position = Vector3(tt[0], 0.0, tt[1])
-			node.scale = Vector3.ONE * 1.7 * grow * (1.0 + 0.06 * maxf(0.0, 0.12 - float(tt[3])) / 0.12)
+			var tt: Dictionary = turrets[k]
+			var grow := clampf((11.0 - float(tt.life)) * 5.0, 0.0, 1.0) * clampf(float(tt.life) * 2.0, 0.3, 1.0)
+			node.position = Vector3(tt.x, 0.0, tt.z)
+			node.scale = Vector3.ONE * 1.7 * grow * (1.0 + 0.06 * maxf(0.0, 0.12 - float(tt.cd)) / 0.12)
 
-func _turret_gone(t: Array) -> void:
-	var at := Vector3(t[0], 0.3, t[1])
+func _turret_gone(t: Dictionary) -> void:
+	var at := Vector3(t.x, 0.3, t.z)
 	if levels.kule >= 7:
 		explode(at, 4.6 * area_mult, 55.0, "kule")
 	else:
@@ -341,15 +341,14 @@ func _tracer(a: Vector3, c: Vector3) -> void:
 	var n := bolt_nodes[bolt_i]
 	bolt_t[bolt_i] = 0.07
 	bolt_i = (bolt_i + 1) % bolt_nodes.size()
-	var len := a.distance_to(c)
-	if len < 0.05:
+	var dist := a.distance_to(c)
+	if dist < 0.05:
 		return
 	n.visible = true
 	var up := Vector3.UP if absf((c - a).normalized().y) < 0.95 else Vector3.RIGHT
 	n.look_at_from_position((a + c) * 0.5, c, up)
-	n.scale = Vector3(1, 1, len)
+	n.scale = Vector3(1, 1, dist)
 
-# Honey trail: running leaves honey behind; whatever wades through it is slowed and burned.
 func _update_trail(dt: float, p: Vector3) -> void:
 	var en = main.enemies
 	var l: int = levels.iz
@@ -358,18 +357,17 @@ func _update_trail(dt: float, p: Vector3) -> void:
 		var life := 3.0 + 1.5 * b(l >= 3) + 1.5 * b(l >= 6)
 		if Vector2(p.x - trail_last.x, p.z - trail_last.z).length() > r * 0.9 and p.y < 0.6:
 			trail_last = p
-			trail.append([p.x, p.z, life])
+			trail.append({"x": p.x, "z": p.z, "life": life})
 			var col := Color(1.0, 0.42, 0.08, 0.8) if l >= 7 else Color(1.0, 0.72, 0.12, 0.75)
 			main.fx.splat(p.x, p.z, r * 1.1, col, life)
 		timers.iz -= dt
 		if timers.iz <= 0.0:
-			# every chaser ends up walking through the trail, so each tick is small
 			timers.iz = 0.4
 			var d := 5.0 + 2.0 * b(l >= 2) + 3.0 * b(l >= 5) + 4.0 * b(l >= 6) + 8.0 * b(l >= 7)
 			var seen := {}
 			var bursts := 0
 			for t in trail:
-				for i in en.query(t[0], t[1], r):
+				for i in en.query(t.x, t.z, r):
 					var u: int = en.uid[i]
 					if seen.has(u) or en.height_of(i) > 0.5:
 						continue
@@ -378,19 +376,17 @@ func _update_trail(dt: float, p: Vector3) -> void:
 					var ex: float = en.px[i]
 					var ez: float = en.pz[i]
 					if deal(i, d, 0.0, 0.0, "iz") and l >= 7 and bursts < 3:
-						# burning honey: what dies in it bursts
 						bursts += 1
 						explode(Vector3(ex, 0.3, ez), 2.6 * area_mult, 26.0, "iz")
 	if trail.is_empty():
 		return
-	var keep: Array = []
+	var keep: Array[Dictionary] = []
 	for t in trail:
-		t[2] -= dt
-		if t[2] > 0.0:
+		t.life -= dt
+		if t.life > 0.0:
 			keep.append(t)
 	trail = keep
 
-# The hive call: one blast around the keeper, then five seconds of bees tearing at whatever is near.
 func call_hive() -> void:
 	var pl = main.player
 	var en = main.enemies
@@ -403,7 +399,6 @@ func call_hive() -> void:
 		var dz: float = en.pz[i] - p.z
 		var dl := sqrt(dx * dx + dz * dz) + 0.01
 		var big: bool = en.typ[i] == en.T_BOSS or en.typ[i] >= en.T_STAG
-		# the call clears a crowd; against a champion or the queen it only buys a breath
 		en.hurt(i, en.maxhp[i] * 0.02 if big else 20.0 * hs, dx / dl * 20.0, dz / dl * 20.0, "cagri")
 	main.fx.explosion(p, 13.0, Color(1.0, 0.8, 0.2))
 	main.fx.explosion(p, 7.0, Color(1.0, 0.95, 0.6))
@@ -432,7 +427,6 @@ func _update_swarm(dt: float, p: Vector3) -> void:
 				var big: bool = en.typ[i] == en.T_BOSS or en.typ[i] >= en.T_STAG
 				en.hurt(i, en.maxhp[i] * 0.001 if big else 7.0 * hs, 0.0, 0.0, "cagri")
 	swarm.visible = true
-	# the swarm spreads out fast, then thins as the call fades
 	var open := clampf((4.0 - ult_t) * 3.0, 0.0, 1.0)
 	var fade := clampf(ult_t * 1.6, 0.0, 1.0)
 	for k in SWARM_N:
@@ -440,7 +434,6 @@ func _update_swarm(dt: float, p: Vector3) -> void:
 		var a := s * 40.0 + wtime * (2.5 + 3.5 * fmod(s * 7.0, 1.0)) * (1.0 if k % 2 == 0 else -1.0)
 		var r := (1.5 + 9.5 * fmod(s * 13.0, 1.0)) * open
 		var y := 0.7 + 2.2 * fmod(s * 29.0, 1.0) + sin(wtime * 6.0 + s * 20.0) * 0.4
-		# small streaks that follow their own circle, not round blobs
 		var sb := Basis(Vector3.UP, -a).scaled_local(Vector3(0.32, 0.32, 1.0) * fade)
 		swarm_mm.set_instance_transform(k, Transform3D(sb, Vector3(p.x + cos(a) * r, p.y + y, p.z + sin(a) * r)))
 
@@ -472,7 +465,6 @@ func _update_bees(dt: float) -> void:
 		var gone := qlife[i] <= 0.0
 		var t: int = en.index_of(qtu[i], qhint[i])
 		if t < 0 and not gone:
-			# target died or moved in the arrays: find it again or pick a new one
 			var found := -1
 			for j in en.count:
 				if en.uid[j] == qtu[i] and en.dead[j] == 0:
@@ -493,7 +485,7 @@ func _update_bees(dt: float) -> void:
 			qvz[i] = lerpf(qvz[i], dz / d * 19.0, turn)
 			ty = en.height_of(t) + 0.6
 			if d < en.rad[t] + 0.45:
-				var killed := deal(t, qdmg[i], qvx[i] * 0.25, qvz[i] * 0.25, "ari")
+				deal(t, qdmg[i], qvx[i] * 0.25, qvz[i] * 0.25, "ari")
 				qlast[i] = en.uid[t]
 				qpierce[i] -= 1
 				if qpierce[i] < 0:
@@ -505,8 +497,6 @@ func _update_bees(dt: float) -> void:
 						qhint[i] = nt
 					else:
 						gone = true
-				if killed:
-					pass
 		qx[i] += qvx[i] * dt
 		qz[i] += qvz[i] * dt
 		qy[i] = lerpf(qy[i], ty, minf(1.0, dt * 6.0))
@@ -523,7 +513,7 @@ func _update_bees(dt: float) -> void:
 	bee_mm.visible_instance_count = qn
 
 func _update_bombs(dt: float) -> void:
-	var keep: Array = []
+	var keep: Array[Dictionary] = []
 	var k := 0
 	for n in bomb_nodes:
 		n.visible = false
@@ -555,7 +545,6 @@ func explode(at: Vector3, r: float, d: float, src: String) -> void:
 	main.fx.shake(0.3)
 	main.audio.play("explosion", -5.0, randf_range(0.9, 1.1))
 
-# Shoves the crowd away without hurting it: used when play resumes after an upgrade choice.
 func push_back(at: Vector3, r: float, force: float, show := true) -> void:
 	var en = main.enemies
 	for i in en.query(at.x, at.z, r):
@@ -610,11 +599,11 @@ func _bolt(a: Vector3, c: Vector3) -> void:
 		bolt_i = (bolt_i + 1) % bolt_nodes.size()
 		var s: Vector3 = seg[0]
 		var e: Vector3 = seg[1]
-		var len := s.distance_to(e)
-		if len < 0.05:
+		var dist := s.distance_to(e)
+		if dist < 0.05:
 			continue
 		n.visible = true
 		n.position = (s + e) * 0.5
 		var up := Vector3.UP if absf((e - s).normalized().y) < 0.95 else Vector3.RIGHT
 		n.look_at_from_position((s + e) * 0.5, e, up)
-		n.scale = Vector3(1, 1, len)
+		n.scale = Vector3(1, 1, dist)
